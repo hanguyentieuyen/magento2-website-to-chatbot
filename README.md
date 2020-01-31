@@ -45,10 +45,6 @@ resource_owner_secret = u"add resource owner secret"
 
 base_url_v = "Give your base URL"
 
-image_url_c = "add image url of categories"
-
-image_url_sc = "add image url of the subcategory"
-
 store_name = "## your store name"
 
 ```
@@ -63,22 +59,28 @@ store_name = "## your store name"
 
 - Django_project
 
-- Django_project
+-- Django_project
 
-- magento_app
+-- magento_app
 
-- df_facebook.py
+--- df_facebook.py
 
-- df_lib.py
+--- df_lib.py
 
-- views.py
+--- views.py
 
-- library
+-- library
 
-- df_response_lib.py
+--- df_response_lib.py
 
-- facebook_template_lib.py
+--- facebook_template_lib.py
 
-- variables.py
+-- variables.py
 
 ```
+
+For more information on how to use this code, refer our [Tutorial: Magento 2 Ecommerce Chatbot For Google Assistant & Facebook Messenger](https://www.pragnakalp.com/magento-2-ecommerce-chatbot-for-google-assistant-facebook-messenger/)
+ 
+_____
+
+Repository Published by [Pragnakalp Techlabs - Chatbots Development, Natural Language Processing, Machine Learning, Python/NodeJS Solutions](https://www.pragnakalp.com/)
