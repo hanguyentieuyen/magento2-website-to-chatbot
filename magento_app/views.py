@@ -11,17 +11,20 @@
 
 # Import required libraries
 import json
+import importlib
+from variables import client_key, client_secret, resource_owner_key, resource_owner_secret, base_url, store_name, app_name
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from restinmagento.oauth import OAuth # <-- install restinmagento 
 from restinmagento.resource import Resource
-from magento_app.df_lib import update_parameters, cleanhtml # <--
-from magento_app.df_facebook import genric_list_response, genric_card_response
 from library.facebook_template_lib import FacebookTemplate # <--
 from library.df_response_lib import actions_on_google_response, facebook_response, fulfillment_response
-from variables import client_key, client_secret, resource_owner_key, resource_owner_secret, base_url, store_name
 from requests_oauthlib import OAuth1
 import requests
+import os
+
+df_lib = importlib.import_module(app_name+".df_lib")
+df_facebook = importlib.import_module(app_name+".df_facebook")
 
 def home(request):
     """ Return http response """
@@ -38,13 +41,15 @@ def webhook(request):
     
     no_update = 0
     no_suggestion = 0
+    one_product = 0
     
+    # Define the size of the page for the pagination in the list response
     flow_1_page_size = 10
     flow_2_page_size = 10
     flow_3_page_size = 10
 
     # Read a request object from the dialogFlow webhook request
-    req = json.loads(request.body)
+    req = json.loads(request.body.decode('utf-8'))
 
     # Authentication for Magento API excess
     oauth = OAuth(client_key=client_key,
@@ -52,21 +57,28 @@ def webhook(request):
         resource_owner_key=resource_owner_key,
         resource_owner_secret=resource_owner_secret)
 
-    GetOauth = OAuth1(client_key=client_key,
+    # Authentication for Magento API excess using OAuth1
+    oauth1 = OAuth1(client_key=client_key,
         client_secret=client_secret,
         resource_owner_key=resource_owner_key,
         resource_owner_secret=resource_owner_secret)
 
+    # Extract the symbol of the currency used in the store
+    currency_resource  = Resource(base_url+'rest/V1/directory/currency', oauth)
+    currency_dict = currency_resource.get()
+    currency_json = currency_dict.json()
+    currency_symbol = currency_json["base_currency_symbol"]
+
     # Extract product categories detail using magento API
-    resource_category  = Resource(base_url+'rest/V1/categories/', oauth)
-    category_dict = resource_category.get()
-    product_categories = category_dict.json()
+    category_resource  = Resource(base_url+'rest/V1/categories/', oauth)
+    category_dict = category_resource.get()
+    category_json = category_dict.json()
 
     # Extracting main categories' name and id
     main_categories_name = []
     main_categories_id = []
 
-    for c in product_categories['children_data']:
+    for c in category_json['children_data']:
         if c['is_active'] == True and (c['product_count'] != 0 or c['children_data'] != []):
             main_categories_name.append(c['name'])
             main_categories_id.append(c['id'])
@@ -77,7 +89,7 @@ def webhook(request):
     for i in range(len(main_categories_id)):
         name = []
         id = []
-        for c in product_categories['children_data']:
+        for c in category_json['children_data']:
             if c['name'] == main_categories_name[i]:
                 for f in c['children_data']:
                     if f['is_active'] == True:
@@ -87,25 +99,45 @@ def webhook(request):
         subcategories_names.append(name)
         subcategories_ids.append(id)
 
-        
     # Read action of the intent from the webhook request
     action = req.get('queryResult').get('action')
 
     # Redirect to product list if there is no subcategories available for the given category
-    direct = 0
+    redirect = 0
     if action == 'sub_category':
-        parameters = int(float(req.get('queryResult').get('parameters').get("category_number"))) #get parameters from json
-        for i in range(len(main_categories_id)):
-            for c in product_categories['children_data']:
-                if c['is_active'] == True and c['id'] == parameters:
-                    if c['children_data'] == []:
-                        action = 'product_list'
-                        direct = 1
+        parameters = req.get('queryResult').get('parameters').get("category_number")
+        if parameters == "":
+            redirect = 1
+            outputContexts = req.get('queryResult').get('outputContexts')
+            for m in outputContexts:
+                name = m.get("name")
+                word = "one_item_list"
+                if name[-len(word):] == word:
+                    parameters = int(float(m.get('parameters').get('key_value')))
+        else:
+            parameters = int(float(parameters)) #get parameters from json
+            for i in range(len(main_categories_id)):
+                for c in category_json['children_data']:
+                    if c['is_active'] == True and c['id'] == parameters:
+                        if c['children_data'] == []:
+                            action = 'product_list'
+                            redirect = 1
     elif action == 'product_list':
-        if direct != 1:
+        if redirect != 1:
             try:
-                parameters = int(float(req.get('queryResult').get('parameters').get("category_number"))) #get parameters from json
+                parameters = req.get('queryResult').get('parameters').get("category_number")
+                if parameters == "":
+                    redirect = 1
+                    outputContexts = req.get('queryResult').get('outputContexts')
+                    for m in outputContexts:
+                        name = m.get("name")
+                        word = "one_item_list"
+                        if name[-len(word):] == word:
+                            parameters = int(float(m.get('parameters').get('key_value')))
+                else:
+                    parameters = int(float(req.get('queryResult').get('parameters').get("category_number"))) #get parameters from json
             except:
+                redirect = 1
                 action = "product_detail"
 
     # Initialize or update parameters from the last response for the pagination
@@ -117,8 +149,7 @@ def webhook(request):
         search_product_name = None
         last_num_of_product = 0
     else:
-        flow_indicator, start_point_flow, start_point_browse, start_point_search, search_product_name, text_response, last_num_of_product, action    = update_parameters(req, action)
-
+        flow_indicator, start_point_flow, start_point_browse, start_point_search, search_product_name, text_response, last_num_of_product, action    = df_lib.update_parameters(req, action)
     
     # Get the platform of the chatbot
     platform = req.get('originalDetectIntentRequest').get('source')
@@ -127,52 +158,67 @@ def webhook(request):
     if platform == 'facebook':
         fb = facebook_response()
         fb_t = FacebookTemplate()
+        userID = req.get('originalDetectIntentRequest').get('payload').get('data').get('sender').get('id')
 
     elif platform == 'google' or 'None':
         aog = actions_on_google_response()
-        
+        if platform == 'google':
+            userID = req.get('originalDetectIntentRequest').get('payload').get('user').get('userStorage')
+
     # Default welcome intent response   
     if action == "input.welcome":
         text_response = "Welcome to " + store_name +"."
         suggestion_text_fb = "How would you like to explore?"
         if platform == "google":
             text_response += "  \n" + suggestion_text_fb
-        suggestions = ["Show categories", "Search product", "Browse all product"]       
+        suggestions = ["Show categories", "Search product", "Browse all product"]
 
     # Main categories of the store - selection list response
     elif action == 'category_names':
 
         flow_indicator = 1
-
         text_response = 'Select your category here.'
-
         list_elements = []
 
         # lopp over all categories
         for a in range(len(main_categories_name)):
-            image_url = image_url_c
+            image_url = ""
             if  platform == 'facebook':
-                fb_t_e = genric_list_response(main_categories_name,"", main_categories_id, image_url = image_url, index =  a)
+                fb_t_e = df_facebook.genric_list_fesponse(main_categories_name,"", main_categories_id, image_url = image_url, index =  a)
                 fb_t.add_element(fb_t_e)
 
             elif platform == 'google' or 'None':
                 # if there is only 1 category, then list respose won't be work, to solve that we are giving card response 
                 if len(main_categories_name) == 1:
+                    text_response = "Say 'Subcategory' to check more subcategory of "+ main_categories_name[a] +"."
+                    suggestions = ["Subcategory", "Back"]
+                    one_product = 1
+                    key = main_categories_id[a]
                     aog_sc = aog.basic_card(main_categories_name[a], subtitle="check subcategories of "+str(main_categories_name[a]), formattedText="", image=[image_url, "Sample_image"])
                 else:
                     list_elements.append([main_categories_name[a], "check subcategories of "+str(main_categories_name[a]), [main_categories_id[a], [main_categories_name[a]+str(1), main_categories_name[a]+str(2)]],["", 'image_discription']])
-                
+
         if platform == 'facebook':
             suggestion_text_fb = "Say BACK to browse previous response."
             fb_sc = fb.custom_payload(fb_t.get_payload())
-        elif platform == 'google' or 'None':
+        elif (platform == 'google' or 'None') and len(main_categories_name) > 1:
             list_title = "Categories"
             aog_sc = aog.list_select(list_title, list_elements)
 
     # Subcategories webhook selection list response
     elif action == 'sub_category':
 
-        search_product_name = int(float(req.get('queryResult').get('parameters').get("category_number"))) #get parameters from json
+        search_product_name = req.get('queryResult').get('parameters').get("category_number") #get parameters from json
+        if search_product_name == "":
+            redirect = 1
+            outputContexts = req.get('queryResult').get('outputContexts')
+            for m in outputContexts:
+                name = m.get("name")
+                word = "one_item_list"
+                if name[-len(word):] == word:
+                    search_product_name = int(float(m.get('parameters').get('key_value')))
+        else:
+            search_product_name = int(float(search_product_name))
 
         list_elements = []
 
@@ -188,18 +234,20 @@ def webhook(request):
                 
                 # loop over all subcategories
                 for a in range(len(subcategories_name)):
-                    image_url = image_url_sc
+                    image_url = ""
                     if platform == 'facebook':
-                        fb_t_e = genric_list_response(subcategories_name, "", subcategories_id, index = a)
+                        fb_t_e = df_facebook.genric_list_fesponse(subcategories_name, "", subcategories_id, index = a)
                         fb_t.add_element(fb_t_e)
                     elif platform == 'google' or 'None':
-
                         # if there is only 1 subcategory, then list respose won't be work, to solve that we are giving card response
                         if len(subcategories_name) == 1:
+                            text_response = "Reply 'Product list' to check more products of "+ subcategories_name[a] +"."
+                            suggestions = ["Product list", "Back"]
+                            one_product = 1
+                            key = subcategories_id[a]
                             aog_sc = aog.basic_card(subcategories_name[a], subtitle="check products of "+str(subcategories_name[a]), formattedText="", image=[image_url, "Sample_image"])
                         else:
                             list_elements.append([subcategories_name[a], "check products of "+str(subcategories_name[a]), [subcategories_id[a], [subcategories_name[a]+str(1), subcategories_name[a]+str(2)]],[image_url, 'image_discription']])
-
         if found_subcategory == 0:
             no_update = 1
 
@@ -215,19 +263,18 @@ def webhook(request):
     elif action == 'product_list':
 
         flow_indicator = 1
-
         text_response = "Which one you would like to buy? Select to choose your's.:"
 
-        # if exctracting product list of direct main category (no subcategories available) then use parameter value exctracted above
-        if direct != 1:
+        # if exctracting product list of redirect main category (no subcategories available) then use parameter value exctracted above
+        if redirect != 1:
             parameters = int(float(req.get('queryResult').get('parameters').get("category_number"))) #get parameters from json
 
         search_product_name = parameters
         
         # Extracting sku of the products of given category id using Magento API
         source_path = base_url+'rest/V1/categories/'+str(int(parameters))+'/products'
-        resource_product_sku  = Resource(source_path, oauth)
-        product_sku_dict = resource_product_sku.get()
+        product_sku_resource  = Resource(source_path, oauth)
+        product_sku_dict = product_sku_resource.get()
         products_sku_json = product_sku_dict.json()
         product_sku = []
         
@@ -263,7 +310,7 @@ def webhook(request):
         params["searchCriteria[filter_groups][1][filters][1][value]"] = "simple"
         params["searchCriteria[filter_groups][1][filters][1][condition_type]"] = "eq"
 
-        product_dict = requests.get(url = request_url, params = params, auth = GetOauth)
+        product_dict = requests.get(url = request_url, params = params, auth = oauth1)
         product_list_json = product_dict.json()
         products = product_list_json["items"]
 
@@ -298,11 +345,11 @@ def webhook(request):
             prices = []
 
             if product_type == "configurable":
-                product_children_path = str(base_url+"rest/V1/configurable-products/"+str(product_sku)+"/children")
-                resource_children = Resource(product_children_path, oauth)
-                children_dict = resource_children.get()
-                children_list_json = children_dict.json()
-                for child in children_list_json:
+                children_product_path = str(base_url+"rest/V1/configurable-products/"+str(product_sku)+"/children")
+                children_product_resource = Resource(children_product_path, oauth)
+                children_product_dict = children_product_resource.get()
+                children_product_json = children_product_dict.json()
+                for child in children_product_json:
                     prices.append(child['price'])
                 product_price = min(prices)
             else:
@@ -322,12 +369,14 @@ def webhook(request):
                         configuration_options = b['items'][0]['extension_attributes']['configurable_product_options']
                     except:
                         pass
-                
+            product_image = ""
+            image_url = ""
+            special_price = " "    
             try:
                 for c in b['custom_attributes']:
                     if c['attribute_code'] == 'image':
                         product_image = c['value']
-                        image_url = base_url+ 'media/catalog/product/cache/bbfa12b537f6bc819f30d0b45a110c5b' + product_image
+                        image_url = base_url+ 'media/catalog/product/' + product_image
                     elif c['attribute_code'] == 'special_price':
                         special_price = c['value']  
             except:
@@ -335,29 +384,29 @@ def webhook(request):
                     for c in b['items'][0]['custom_attributes']:
                         if c['attribute_code'] == 'image':
                             product_image = c['value']
-                            image_url = base_url+ 'media/catalog/product/cache/bbfa12b537f6bc819f30d0b45a110c5b' + product_image
+                            image_url = base_url+ 'media/catalog/product/' + product_image
                         elif c['attribute_code'] == 'special_price':
                             special_price = c['value']
                 except:
                     pass
             if product_type == "configurable":
-                price_text = "Price starts from: $"
+                price_text = "Price starts from: "+ currency_symbol
             else:
-                price_text = "Price: $"
+                price_text = "Price: "+ currency_symbol
             
             if no_product == 1:
                 continue
             if platform == 'facebook':
                 try:
-                    fb_t_e = genric_list_response(product_name,price_text+"{0:.2f}".format(float(special_price))+ "\nRegular Price: $"+str(product_price), str(product_sku), image_url)
+                    fb_t_e = df_facebook.genric_list_fesponse(product_name,price_text+"{0:.2f}".format(float(special_price))+ "\nRegular Price: "+currency_symbol+str(product_price), str(product_sku), image_url)
                 except:
                     try:
-                        fb_t_e = genric_list_response(product_name,price_text+str(product_price), str(product_sku), image_url)
+                        fb_t_e = df_facebook.genric_list_fesponse(product_name,price_text+str(product_price), str(product_sku), image_url)
                     except:
                         try:
-                            fb_t_e = genric_list_response(product_name," ", str(product_sku), image_url)
+                            fb_t_e = df_facebook.genric_list_fesponse(product_name," ", str(product_sku), image_url)
                         except:
-                            fb_t_e = genric_list_response(product_name," ", str(product_sku))
+                            fb_t_e = df_facebook.genric_list_fesponse(product_name," ", str(product_sku))
                 fb_t.add_element(fb_t_e)
             
             elif platform == 'google' or 'None':
@@ -365,8 +414,12 @@ def webhook(request):
                 # if only one product the list response won't be work, to solve that we are uuing card response
                 # all try - except are to solve the unsufficient data avilable of the products to display
                 if length_product_sku - start_point_flow == 1:
+                    text_response = "Reply 'Product detail' to get more details of "+ product_name +"."
+                    suggestions = ["Product detail", "Back"]
+                    one_product = 1
+                    key = product_sku
                     try:
-                        aog_sc = aog.basic_card(product_name, subtitle=price_text+ "{0:.2f}".format(float(special_price))+ "\nRegular Price: $"+str(product_price), image=[image_url, "Sample_image"])  
+                        aog_sc = aog.basic_card(product_name, subtitle=price_text+ "{0:.2f}".format(float(special_price))+ "\nRegular Price: "+currency_symbol+str(product_price), image=[image_url, "Sample_image"])  
                     except:
                         try:
                             aog_sc = aog.basic_card(product_name, subtitle=price_text+str(product_price), image=[image_url, "Sample_image"])
@@ -377,7 +430,7 @@ def webhook(request):
                                 aog_sc = aog.basic_card(product_name, subtitle=" "+str(product_price))
                 else:
                     try:
-                        list_elements.append([product_name,price_text+"{0:.2f}".format(float(special_price))+ "\nRegular Price: $"+str(product_price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
+                        list_elements.append([product_name,price_text+"{0:.2f}".format(float(special_price))+ "\nRegular Price: "+currency_symbol+str(product_price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
                     except:
                         try:
                             list_elements.append([product_name, price_text+str(product_price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
@@ -389,24 +442,22 @@ def webhook(request):
         elif platform == 'google' or 'None':
             list_title = 'products'
             if length_product_sku - start_point_flow > 1:
-                aog_sc = aog.list_select(list_title, list_elements)
+               aog_sc = aog.list_select(list_title, list_elements)
 
     # Browse Product Response
     elif action == "browse_product":
         flow_indicator = 2
-
         text_response = "Which one you would like to buy? Select to choose your's."
         
         # Extracting products from the all the categories to browse the products
-        
         product_source_path = str(base_url+"rest/V1/products?searchCriteria[pageSize]="+str(flow_2_page_size)+"&searchCriteria[currentPage]="+str(int(start_point_browse/flow_2_page_size)+1)+"&searchCriteria[filter_groups][0][filters][0][field]=visibility&searchCriteria[filter_groups][0][filters][0][value]=1&searchCriteria[filter_groups][0][filters][0][condition_type]=neq&searchCriteria[filter_groups][1][filters][0][field]=type_id&searchCriteria[filter_groups][1][filters][0][value]=simple&searchCriteria[filter_groups][1][filters][0][condition_type]=eq&searchCriteria[filter_groups][1][filters][1][field]=type_id&searchCriteria[filter_groups][1][filters][1][value]=configurable&searchCriteria[filter_groups][1][filters][1][condition_type]=like")
         resource_product = Resource(product_source_path, oauth)
         product_list_dict = resource_product.get()
-        product_list__json = product_list_dict.json()
-        p = product_list__json.get("items")
+        product_list_json = product_list_dict.json()
+        p = product_list_json.get("items")
 
         # Number of total products
-        length = product_list__json.get("total_count")
+        length = product_list_json.get("total_count")
 
         # Number of products in one page
         length_product_sku_flow_2 = len(p)
@@ -424,36 +475,44 @@ def webhook(request):
                 price = "As per options"
             else:
                 price = p[n].get('price') # <--
-            special_price = None
+            
+            special_price = " "
+            product_image = ""
+            image_url = ""
+            product_description = " "
 
             for c in p[n]['custom_attributes']: # <--
                 if c['attribute_code'] == "description": # <--
-                    product_description = cleanhtml(c['value']) # <--
+                    product_description = df_lib.cleanhtml(c['value']) # <--
                 elif c['attribute_code'] == 'image': # <--
                     product_image = c['value'] # <--
-                    image_url = base_url+ 'media/catalog/product' + product_image
+                    image_url = base_url+ 'pub/media/catalog/product' + product_image
                 elif c['attribute_code'] == "special_price": # <--
                     special_price = c['value'] # <--
 
             if product_type == "configurable":
                 price_text = "Price starts from: "
             else:
-                price_text = "Price: $"
+                price_text = "Price: "+currency_symbol
 
             if platform == "facebook":
-                if special_price != None:
-                    fb_t_e = genric_list_response(product_name, price_text+"{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(price), str(product_sku), image_url)
+                if special_price != None and special_price != " ":
+                    fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text+"{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(price), str(product_sku), image_url)
                 else:
                     if price != None: # <--
-                        fb_t_e = genric_list_response(product_name, price_text+ str(price), str(product_sku), image_url)
+                        fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text+ str(price), str(product_sku), image_url)
                     else:
-                        fb_t_e = genric_list_response(product_name," ", str(product_sku), image_url)                        
+                        fb_t_e = df_facebook.genric_list_fesponse(product_name," ", str(product_sku), image_url)                        
                 fb_t.add_element(fb_t_e)
 
             elif platform == 'google' or 'None':
                 if length_product_sku_flow_2 == 1:
+                    text_response = "Reply 'Product detail' to get more details of "+ product_name +"."
+                    suggestions = ["Product detail", "Back"]
+                    one_product = 1
+                    key = product_sku
                     if special_price != None:
-                        aog_sc = aog.basic_card(product_name, subtitle=  price_text+"{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(price), image=[image_url, "Sample_image"])
+                        aog_sc = aog.basic_card(product_name, subtitle=  price_text+"{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(price), image=[image_url, "Sample_image"])
                     else:
                         if price != None: # <--
                             aog_sc = aog.basic_card(product_name, subtitle=  price_text+ str(price), image=[image_url, "Sample_image"])  
@@ -461,7 +520,7 @@ def webhook(request):
                             aog_sc = aog.basic_card(product_name, subtitle= " ", image=[image_url, "Sample_image"])
                 else:
                     if special_price != None:
-                        list_elements.append([product_name,  price_text+"{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']]) # <--
+                        list_elements.append([product_name,  price_text+"{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']]) # <--
                     else:
                         if price != None: # <--
                             list_elements.append([product_name,  price_text+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])         # <--
@@ -487,14 +546,13 @@ def webhook(request):
         search_product_name = req.get('queryResult').get('parameters').get("product_name") #get parameters from json
         
         # Exctracting the search product result using the Magento API
-        product_source_path = str(base_url+"rest/V1/products?searchCriteria[filter_groups][0][filters][0][field]=name&searchCriteria[filter_groups][0][filters][0][value]=%"+ str(search_product_name) +"%&searchCriteria[filter_groups][0][filters][0][condition_type]=like&searchCriteria[filter_groups][1][filters][0][field]=visibility&searchCriteria[filter_groups][1][filters][0][value]=1&searchCriteria[filter_groups][1][filters][0][condition_type]=neq&searchCriteria[filter_groups][2][filters][0][field]=type_id& searchCriteria[filter_groups][2][filters][0][value]=simple&searchCriteria[filter_groups][2][filters][0][condition_type]=eq&searchCriteria[filter_groups][2][filters][1][field]=type_id&searchCriteria[filter_groups][2][filters][1][value]=configurable&searchCriteria[filter_groups][2][filters][1][condition_type]=like")
-        
-        resource_product = Resource(product_source_path, oauth)
-        product_dict = resource_product.get()
-        search_product_list_json = product_dict.json()
+        search_product_path = str(base_url+"rest/V1/products?searchCriteria[filter_groups][0][filters][0][field]=name&searchCriteria[filter_groups][0][filters][0][value]=%"+ str(search_product_name) +"%&searchCriteria[filter_groups][0][filters][0][condition_type]=like&searchCriteria[filter_groups][1][filters][0][field]=visibility&searchCriteria[filter_groups][1][filters][0][value]=1&searchCriteria[filter_groups][1][filters][0][condition_type]=neq&searchCriteria[filter_groups][2][filters][0][field]=type_id& searchCriteria[filter_groups][2][filters][0][value]=simple&searchCriteria[filter_groups][2][filters][0][condition_type]=eq&searchCriteria[filter_groups][2][filters][1][field]=type_id&searchCriteria[filter_groups][2][filters][1][value]=configurable&searchCriteria[filter_groups][2][filters][1][condition_type]=like")
+        search_product_resource = Resource(search_product_path, oauth)
+        search_product_dict = search_product_resource.get()
+        search_product_json = search_product_dict.json()
 
         # Total searched products
-        total_product_found = search_product_list_json.get("total_count")
+        total_product_found = search_product_json.get("total_count")
         if int(total_product_found) >= 1:
             no_product_found = 0
             # Simple response text
@@ -503,7 +561,7 @@ def webhook(request):
             # Reading the features of the product (name, image url, url key, product description)
             a = 0        
             list_elements = []
-            for p in search_product_list_json.get("items"):
+            for p in search_product_json.get("items"):
                 
                 if start_point_search < 0:
                     start_point_search = 0
@@ -517,37 +575,44 @@ def webhook(request):
                     else:
                         price = p.get('price')
 
+                    product_description = " "
+                    product_image = ""
+                    special_price = " "
+                    image_url = ""
                     for c in p['custom_attributes']:
                         try:
                             if c['attribute_code'] == "description":
-                                product_description = cleanhtml(c['value'])
+                                product_description = df_lib.cleanhtml(c['value'])
                             elif c['attribute_code'] == 'image':
                                 product_image = c['value']
                             elif c['attribute_code'] == "special_price":
                                 special_price = c['value']
-                            image_url = base_url+ 'media/catalog/product' + product_image
+                            image_url = base_url+ 'pub/media/catalog/product' + product_image
                         except:
                             pass
-
 
                     if product_type == "configurable":
                         price_text = "Price: "
                     else:
-                        price_text = "Price: $"
+                        price_text = "Price: "+currency_symbol
 
                     if platform == 'facebook':
                         try:
-                            fb_t_e = genric_list_response(product_name, price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(product_price), str(product_sku), image_url)
+                            fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(product_price), str(product_sku), image_url)
                         except:
                             try:
-                                fb_t_e = genric_list_response(product_name, price_text + str(price), str(product_sku), image_url)
+                                fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text + str(price), str(product_sku), image_url)
                             except:
-                                fb_t_e = genric_list_response(product_name, price_text + str(price), str(product_sku))
+                                fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text + str(price), str(product_sku))
                         fb_t.add_element(fb_t_e)
                     elif platform == 'google' or 'None':
+                        text_response = "Reply 'Product detail' to get more details of "+ product_name +"."
+                        suggestions = ["Product detail", "Back"]
+                        one_product = 1
+                        key = product_sku
                         if total_product_found - start_point_search == 1:
                             try:
-                                aog_sc = aog.basic_card(product_name, subtitle= price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(product_price), image=[image_url, "Sample_image"])                    
+                                aog_sc = aog.basic_card(product_name, subtitle= price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(product_price), image=[image_url, "Sample_image"])                    
                             except:
                                 try:
                                     aog_sc = aog.basic_card(product_name, subtitle= price_text + str(price), image=[image_url, "Sample_image"])
@@ -555,7 +620,7 @@ def webhook(request):
                                     aog_sc = aog.basic_card(product_name, subtitle= price_text + str(price))
                         else:
                             try:
-                                list_elements.append([product_name, price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
+                                list_elements.append([product_name, price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
                             except:
                                 try:
                                     list_elements.append([product_name, price_text + str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
@@ -581,7 +646,6 @@ def webhook(request):
         else:
             no_product_found = 1
             text_response = "No product found with the name " + search_product_name + "  \nPlease try with another keyword"
-
             
     # Next and Previous page response in the pagination functionality
     elif action == "next" or action == "previous":
@@ -635,7 +699,6 @@ def webhook(request):
                     start_point_flow = 0
 
                 if a >= start_point_flow and a < start_point_flow + flow_1_page_size:
-                    # print(product_sku[a])
                     product_sku[a] = product_sku[a].replace(" ", "")
                     params["searchCriteria[filter_groups][0][filters]["+str(i)+"][field]"] = "sku"
                     params["searchCriteria[filter_groups][0][filters]["+str(i)+"][value]"] = str(product_sku[a])
@@ -643,7 +706,6 @@ def webhook(request):
                     i += 1
                 elif a >= start_point_flow + flow_1_page_size:
                     break
-            # print(params)
 
             params["searchCriteria[filter_groups][1][filters][0][field]"] = "type_id"
             params["searchCriteria[filter_groups][1][filters][0][value]"] = "configurable"
@@ -652,7 +714,7 @@ def webhook(request):
             params["searchCriteria[filter_groups][1][filters][1][value]"] = "simple"
             params["searchCriteria[filter_groups][1][filters][1][condition_type]"] = "eq"
 
-            product_dict = requests.get(url = request_url, params = params, auth = GetOauth)
+            product_dict = requests.get(url = request_url, params = params, auth = oauth1)
             product_list_json = product_dict.json()
             products = product_list_json["items"]
 
@@ -686,11 +748,11 @@ def webhook(request):
                 prices = []
 
                 if product_type == "configurable":
-                    product_children_path = str(base_url+"rest/V1/configurable-products/"+str(product_sku)+"/children")
-                    resource_children = Resource(product_children_path, oauth)
-                    children_dict = resource_children.get()
-                    children_list_json = children_dict.json()
-                    for child in children_list_json:
+                    children_product_path = str(base_url+"rest/V1/configurable-products/"+str(product_sku)+"/children")
+                    children_product_resource = Resource(children_product_path, oauth)
+                    children_product_dict = children_product_resource.get()
+                    children_product_json = children_product_dict.json()
+                    for child in children_product_json:
                         prices.append(child['price'])
                     product_price = min(prices)
                 else:
@@ -710,12 +772,13 @@ def webhook(request):
                             configuration_options = b['items'][0]['extension_attributes']['configurable_product_options']
                         except:
                             pass
-                    
+                product_image = ""
+                special_price = " "
                 try:
                     for c in b['custom_attributes']:
                         if c['attribute_code'] == 'image':
                             product_image = c['value']
-                            image_url = base_url+ 'media/catalog/product/cache/bbfa12b537f6bc819f30d0b45a110c5b' + product_image
+                            image_url = base_url+ 'media/catalog/product/' + product_image
                         elif c['attribute_code'] == 'special_price':
                             special_price = c['value']  
                 except:
@@ -723,30 +786,30 @@ def webhook(request):
                         for c in b['items'][0]['custom_attributes']:
                             if c['attribute_code'] == 'image':
                                 product_image = c['value']
-                                image_url = base_url+ 'media/catalog/product/cache/bbfa12b537f6bc819f30d0b45a110c5b' + product_image
+                                image_url = base_url+ 'media/catalog/product/' + product_image
                             elif c['attribute_code'] == 'special_price':
                                 special_price = c['value']
                     except:
                         pass
 
                 if product_type == "configurable":
-                    price_text = "Price starts from: $"
+                    price_text = "Price starts from: "+currency_symbol
                 else:
-                    price_text = "Price: $"
+                    price_text = "Price: "+currency_symbol
                 
                 if no_product == 1:
                     continue
                 if platform == 'facebook':
                     try:
-                        fb_t_e = genric_list_response(product_name,price_text+"{0:.2f}".format(float(special_price))+ "\nRegular Price: $"+str(product_price), str(product_sku), image_url)
+                        fb_t_e = df_facebook.genric_list_fesponse(product_name,price_text+"{0:.2f}".format(float(special_price))+ "\nRegular Price: "+currency_symbol+str(product_price), str(product_sku), image_url)
                     except:
                         try:
-                            fb_t_e = genric_list_response(product_name,price_text+str(product_price), str(product_sku), image_url)
+                            fb_t_e = df_facebook.genric_list_fesponse(product_name,price_text+str(product_price), str(product_sku), image_url)
                         except:
                             try:
-                                fb_t_e = genric_list_response(product_name," ", str(product_sku), image_url)
+                                fb_t_e = df_facebook.genric_list_fesponse(product_name," ", str(product_sku), image_url)
                             except:
-                                fb_t_e = genric_list_response(product_name," ", str(product_sku))
+                                fb_t_e = df_facebook.genric_list_fesponse(product_name," ", str(product_sku))
                     fb_t.add_element(fb_t_e)
                 
                 elif platform == 'google' or 'None':
@@ -754,8 +817,12 @@ def webhook(request):
                     # if only one product the list response won't be work, to solve that we are uuing card response
                     # all try - except are to solve the unsufficient data avilable of the products to display
                     if length_product_sku - start_point_flow == 1:
+                        text_response = "Reply 'Product detail' to get more details of "+ product_name +"."
+                        suggestions = ["Product detail", "Back"]
+                        one_product = 1
+                        key = product_sku
                         try:
-                            aog_sc = aog.basic_card(product_name, subtitle=price_text+ "{0:.2f}".format(float(special_price))+ "\nRegular Price: $"+str(product_price), image=[image_url, "Sample_image"])  
+                            aog_sc = aog.basic_card(product_name, subtitle=price_text+ "{0:.2f}".format(float(special_price))+ "\nRegular Price: "+currency_symbol+str(product_price), image=[image_url, "Sample_image"])  
                         except:
                             try:
                                 aog_sc = aog.basic_card(product_name, subtitle=price_text+str(product_price), image=[image_url, "Sample_image"])
@@ -766,7 +833,7 @@ def webhook(request):
                                     aog_sc = aog.basic_card(product_name, subtitle=" "+str(product_price))
                     else:
                         try:
-                            list_elements.append([product_name,price_text+"{0:.2f}".format(float(special_price))+ "\nRegular Price: $"+str(product_price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
+                            list_elements.append([product_name,price_text+"{0:.2f}".format(float(special_price))+ "\nRegular Price: "+currency_symbol+str(product_price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
                         except:
                             try:
                                 list_elements.append([product_name, price_text+str(product_price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
@@ -788,9 +855,9 @@ def webhook(request):
             product_source_path = str(base_url+"rest/V1/products?searchCriteria[pageSize]="+str(flow_2_page_size)+"&searchCriteria[currentPage]="+str(int(start_point_browse/flow_2_page_size)+1)+"&searchCriteria[filter_groups][0][filters][0][field]=visibility& searchCriteria[filter_groups][0][filters][0][value]=1&searchCriteria[filter_groups][0][filters][0][condition_type]=neq&searchCriteria[filter_groups][1][filters][0][field]=type_id& searchCriteria[filter_groups][1][filters][0][value]=simple&searchCriteria[filter_groups][1][filters][0][condition_type]=eq&searchCriteria[filter_groups][1][filters][1][field]=type_id&searchCriteria[filter_groups][1][filters][1][value]=configurable&searchCriteria[filter_groups][1][filters][1][condition_type]=like")
             resource_product = Resource(product_source_path, oauth)
             product_list_dict = resource_product.get()
-            product_list__json = product_list_dict.json()
-            p = product_list__json.get("items")
-            length = product_list__json.get("total_count")
+            product_list_json = product_list_dict.json()
+            p = product_list_json.get("items")
+            length = product_list_json.get("total_count")
             length_product_sku_flow_2 = len(p)
 
             # Reading the features of the product (name, price, sku, image url) 
@@ -806,35 +873,42 @@ def webhook(request):
                     price = p[n].get('price') # <--
                 product_image = p[n].get("custom_attributes")[0].get("value")
                     
-                special_price = None
+                special_price = " "
+                product_description = " "
+                product_image = ""
+                image_url = ""
                 for c in p[n]['custom_attributes']: # <--
                     if c['attribute_code'] == "description": # <--
-                        product_description = cleanhtml(c['value']) # <--
+                        product_description = df_lib.cleanhtml(c['value']) # <--
                     elif c['attribute_code'] == 'image': # <--
                         product_image = c['value'] # <--
                     elif c['attribute_code'] == "special_price": # <--
                         special_price = c['value'] # <--
 
-                image_url = base_url+ 'media/catalog/product' + product_image
+                image_url = base_url+ 'pub/media/catalog/product' + product_image
 
                 if product_type == "configurable":
                     price_text = "Price starts from: "
                 else:
-                    price_text = "Price: $"
+                    price_text = "Price: "+currency_symbol
                 
                 if platform == 'facebook':
                     if special_price != None:
-                        fb_t_e = genric_list_response(product_name, price_text+ "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(price), str(product_sku), image_url)
+                        fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text+ "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(price), str(product_sku), image_url)
                     else:
                         if price != None: # <--
-                            fb_t_e = genric_list_response(product_name, price_text+ str(price), str(product_sku), image_url)
+                            fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text+ str(price), str(product_sku), image_url)
                         else:
-                            fb_t_e = genric_list_response(product_name," ", str(product_sku), image_url)
+                            fb_t_e = df_facebook.genric_list_fesponse(product_name," ", str(product_sku), image_url)
                     fb_t.add_element(fb_t_e)
                 elif platform == 'google' or 'None':
                     if length_product_sku_flow_2 == 1:
+                        one_product = 1
+                        key = product_sku
+                        text_response = "Reply 'Product detail' to get more details of "+ product_name +"."
+                        suggestions = ["Product detail", "Back"]
                         if special_price != None:
-                            aog_sc = aog.basic_card(product_name, subtitle= price_text+ "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(price), image=[image_url, "Sample_image"])
+                            aog_sc = aog.basic_card(product_name, subtitle= price_text+ "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(price), image=[image_url, "Sample_image"])
                         else:
                             if price != None: # <--
                                 aog_sc = aog.basic_card(product_name, subtitle= price_text+ str(price), image=[image_url, "Sample_image"])  
@@ -842,7 +916,7 @@ def webhook(request):
                                 aog_sc = aog.basic_card(product_name, subtitle= " ", image=[image_url, "Sample_image"])
                     else:
                         if special_price != None:
-                            list_elements.append([product_name,  price_text+ "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']]) # <--
+                            list_elements.append([product_name,  price_text+ "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']]) # <--
                         else:
                             if price != None: # <--
                                 list_elements.append([product_name,  price_text+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])         # <--
@@ -859,13 +933,13 @@ def webhook(request):
         elif flow_indicator == 3:
             
             # Exctracting the search product result using the Magento API
-            product_source_path = str(base_url+"rest/V1/products?searchCriteria[filter_groups][0][filters][0][field]=name&searchCriteria[filter_groups][0][filters][0][value]=%"+ str(search_product_name) +"%&searchCriteria[filter_groups][0][filters][0][condition_type]=like&searchCriteria[filter_groups][1][filters][0][field]=visibility&searchCriteria[filter_groups][1][filters][0][value]=1&searchCriteria[filter_groups][1][filters][0][condition_type]=neq&searchCriteria[filter_groups][2][filters][0][field]=type_id& searchCriteria[filter_groups][2][filters][0][value]=simple&searchCriteria[filter_groups][2][filters][0][condition_type]=eq&searchCriteria[filter_groups][2][filters][1][field]=type_id&searchCriteria[filter_groups][2][filters][1][value]=configurable&searchCriteria[filter_groups][2][filters][1][condition_type]=like")
-            resource_product = Resource(product_source_path, oauth)
-            product_dict = resource_product.get()
-            search_product_list_json = product_dict.json()
+            search_product_path = str(base_url+"rest/V1/products?searchCriteria[filter_groups][0][filters][0][field]=name&searchCriteria[filter_groups][0][filters][0][value]=%"+ str(search_product_name) +"%&searchCriteria[filter_groups][0][filters][0][condition_type]=like&searchCriteria[filter_groups][1][filters][0][field]=visibility&searchCriteria[filter_groups][1][filters][0][value]=1&searchCriteria[filter_groups][1][filters][0][condition_type]=neq&searchCriteria[filter_groups][2][filters][0][field]=type_id& searchCriteria[filter_groups][2][filters][0][value]=simple&searchCriteria[filter_groups][2][filters][0][condition_type]=eq&searchCriteria[filter_groups][2][filters][1][field]=type_id&searchCriteria[filter_groups][2][filters][1][value]=configurable&searchCriteria[filter_groups][2][filters][1][condition_type]=like")
+            search_product_resource = Resource(search_product_path, oauth)
+            search_product_dict = search_product_resource.get()
+            search_product_json = search_product_dict.json()
 
             # Total searched products
-            total_product_found = search_product_list_json.get("total_count")
+            total_product_found = search_product_json.get("total_count")
 
             # Simple response text
             response = str(total_product_found) + " products found"
@@ -876,7 +950,7 @@ def webhook(request):
 
             a = 0
             list_elements = []
-            for p in search_product_list_json.get("items"):
+            for p in search_product_json.get("items"):
                 if start_point_search < 0:
                     start_point_search = 0
                     
@@ -889,10 +963,14 @@ def webhook(request):
                     else:
                         price = p.get('price') # <--
 
+                    product_description = " "
+                    product_image = ""
+                    special_price = " "
+                    image_url = ""
                     for c in p['custom_attributes']:
                         try:
                             if c['attribute_code'] == "description":
-                                product_description = cleanhtml(c['value'])
+                                product_description = df_lib.cleanhtml(c['value'])
                             elif c['attribute_code'] == 'image':
                                 product_image = c['value']
                             elif c['attribute_code'] == "special_price": # <--
@@ -900,26 +978,30 @@ def webhook(request):
                         except:
                             pass
 
-                    image_url = base_url+ 'media/catalog/product' + product_image
+                    image_url = base_url+ 'pub/media/catalog/product' + product_image
 
                     if product_type == "configurable":
                         price_text = "Price: "
                     else:
-                        price_text = "Price: $"
+                        price_text = "Price: "+currency_symbol
 
                     if platform == 'facebook':
                         try:
-                            fb_t_e = genric_list_response(product_name, price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(product_price), str(product_sku), image_url)
+                            fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(product_price), str(product_sku), image_url)
                         except:
                             try:
-                                fb_t_e = genric_list_response(product_name, price_text + str(price), str(product_sku), image_url)
+                                fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text + str(price), str(product_sku), image_url)
                             except:
-                                fb_t_e = genric_list_response(product_name, price_text + str(price), str(product_sku))
+                                fb_t_e = df_facebook.genric_list_fesponse(product_name, price_text + str(price), str(product_sku))
                         fb_t.add_element(fb_t_e)
                     elif platform == 'google' or 'None':
                         if total_product_found - start_point_search == 1:
+                            one_product = 1
+                            key = product_sku
+                            text_response = "Reply 'Product detail' to get more details of "+ product_name +"."
+                            suggestions = ["Product detail", "Back"]
                             try:
-                                aog_sc = aog.basic_card(product_name, subtitle= price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(product_price), image=[image_url, "Sample_image"])                    
+                                aog_sc = aog.basic_card(product_name, subtitle= price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(product_price), image=[image_url, "Sample_image"])                    
                             except:
                                 try:
                                     aog_sc = aog.basic_card(product_name, subtitle= price_text + str(price), image=[image_url, "Sample_image"])
@@ -927,7 +1009,7 @@ def webhook(request):
                                     aog_sc = aog.basic_card(product_name, subtitle= price_text + str(price))
                         else:
                             try:
-                                list_elements.append([product_name, price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
+                                list_elements.append([product_name, price_text + "{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
                             except:
                                 try:
                                     list_elements.append([product_name, price_text + str(price), [product_sku, [product_name+str(1), product_name+str(2)]],[image_url, 'image_discription']])
@@ -957,6 +1039,14 @@ def webhook(request):
         
         # Exctracting the product details using the Magento API
         parameters = req.get('queryResult').get('parameters').get("category_number") #get parameters from json
+        if parameters == "":
+            redirect = 1
+            outputContexts = req.get('queryResult').get('outputContexts')
+            for m in outputContexts:
+                name = m.get("name")
+                word = "one_item_list"
+                if name[-len(word):] == word:
+                    parameters = m.get('parameters').get('key_value')
 
         product_source_path = str(base_url+"rest/V1/products/?searchCriteria[filter_groups][0][filters][0][field]=sku&searchCriteria[filter_groups][0][filters][0][value]="+parameters+"&searchCriteria[filter_groups][0][filters][0][condition_type]=like")
         resource_product = Resource(product_source_path, oauth)
@@ -996,11 +1086,11 @@ def webhook(request):
             prices = []
 
             if product_type == "configurable":
-                product_children_path = str(base_url+"rest/V1/configurable-products/"+str(parameters)+"/children")
-                resource_children = Resource(product_children_path, oauth)
-                children_dict = resource_children.get()
-                children_list_json = children_dict.json()
-                for child in children_list_json:
+                children_product_path = str(base_url+"rest/V1/configurable-products/"+str(parameters)+"/children")
+                children_product_resource = Resource(children_product_path, oauth)
+                children_product_dict = children_product_resource.get()
+                children_product_json = children_product_dict.json()
+                for child in children_product_json:
                     prices.append(child['price'])
                 product_price = min(prices)
             else:
@@ -1020,14 +1110,18 @@ def webhook(request):
                         configuration_options = b['items'][0]['extension_attributes']['configurable_product_options']
                     except:
                         pass
-                
+            product_description = " "
+            product_image = ""
+            image_url = ""
+            meta_title = " "
+            special_price = " "
             try:
                 for c in b['items'][0]['custom_attributes']:
                     if c['attribute_code'] == "description":
-                        product_description = cleanhtml(c['value'])
+                        product_description = df_lib.cleanhtml(c['value'])
                     elif c['attribute_code'] == 'image':
                         product_image = c['value']
-                        image_url = base_url+ 'media/catalog/product' + product_image
+                        image_url = base_url+ 'pub/media/catalog/product' + product_image
                     elif c['attribute_code'] == 'meta_title':
                         meta_title = c['value']
                     elif c['attribute_code'] == 'special_price':
@@ -1036,10 +1130,10 @@ def webhook(request):
                 try:
                     for c in b['items'][0]['custom_attributes']:
                         if c['attribute_code'] == "description":
-                            product_description = cleanhtml(c['value'])
+                            product_description = df_lib.cleanhtml(c['value'])
                         elif c['attribute_code'] == 'image':
                             product_image = c['value']
-                            image_url = base_url+ 'media/catalog/product' + product_image
+                            image_url = base_url+ 'pub/media/catalog/product' + product_image
                         elif c['attribute_code'] == 'meta_title':
                             meta_title = c['value']
                         elif c['attribute_code'] == 'special_price':
@@ -1061,8 +1155,8 @@ def webhook(request):
                     option_code.append(i['value_index']) 
             
                 attribute_source_path = str(base_url+"rest/V1/products/attributes/"+str(attribute_code))
-                resource_product = Resource(attribute_source_path, oauth)
-                attribute_dict = resource_product.get()
+                product_resource = Resource(attribute_source_path, oauth)
+                attribute_dict = product_resource.get()
                 attribute_list_json = attribute_dict.json()
                 attribute_options = attribute_list_json['options']
                 option_text = ""
@@ -1095,33 +1189,33 @@ def webhook(request):
             
             if platform == 'facebook':
                 try:
-                    fb_t_e = genric_card_response(product_name,price_text+" ${0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(product_price)+configuration_options_text+"\n"+product_description, button, "View Product", image_url)
+                    fb_t_e = df_facebook.genric_card_fesponse(product_name,price_text+" "+currency_symbol+"{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(product_price)+configuration_options_text+"\n"+product_description, button, "View Product", image_url)
                 except:
                     try:
-                        fb_t_e = genric_card_response(product_name,price_text+" $"+str(product_price)+configuration_options_text+"\n"+product_description, button, "View Product", image_url)
+                        fb_t_e = df_facebook.genric_card_fesponse(product_name,price_text+" "+currency_symbol+str(product_price)+configuration_options_text+"\n"+product_description, button, "View Product", image_url)
                     except:
                         try:
-                            fb_t_e = genric_card_response(product_name,configuration_options_text+"\n"+product_description, button , "View Product", image_url)
+                            fb_t_e = df_facebook.genric_card_fesponse(product_name,configuration_options_text+"\n"+product_description, button , "View Product", image_url)
                         except:
-                            fb_t_e = genric_card_response(product_name,configuration_options_text+"\n"+product_description, button , "View Product")
+                            fb_t_e = df_facebook.genric_card_fesponse(product_name,configuration_options_text+"\n"+product_description, button , "View Product")
                 fb_t.add_element(fb_t_e)
                 fb_sc = fb.custom_payload(fb_t.get_payload())
 
             elif platform == 'google' or 'None':
                 try:
-                    aog_sc = aog.basic_card(product_name, subtitle= price_text+" ${0:.2f}".format(float(special_price)) + "\nRegular Price: $ "+ str(product_price)+configuration_options_text, formattedText=product_description, image=[image_url, "Sample_image"], buttons=[["View Product",button]])
+                    aog_sc = aog.basic_card(product_name, subtitle= price_text+" "+currency_symbol+"{0:.2f}".format(float(special_price)) + "\nRegular Price: "+currency_symbol+ str(product_price)+configuration_options_text, formattedText=product_description, image=[image_url, "Sample_image"], buttons=[["View Product",button]])
                 except:
                     try:
-                        aog_sc = aog.basic_card(product_name, subtitle=price_text+" $"+str(product_price)+configuration_options_text, formattedText=product_description, image=[image_url, "Sample_image"], buttons=[["View Product",button]])
+                        aog_sc = aog.basic_card(product_name, subtitle=price_text+" "+currency_symbol+str(product_price)+configuration_options_text, formattedText=product_description, image=[image_url, "Sample_image"], buttons=[["View Product",button]])
                     except:
                         aog_sc = aog.basic_card(product_name, subtitle=configuration_options_text, formattedText=product_description, image=[image_url, "Sample_image"], buttons=[["View Product",button]])
 
     # Suggestion chip for all the responses
-    if action != "input.welcome":
+    if action != "input.welcome" and one_product == 0:
         suggestions = ["Back"]
 
     # Suggestionchips for the back, previous, next indication to manage pagination and back functionality
-    if action == "previous" or action == "next" or action == "product_list" or action == "search_product" or action == "browse_product": # <--
+    if one_product == 0 and (action == "previous" or action == "next" or action == "product_list" or action == "search_product" or action == "browse_product"): # <--
         if length_product_sku <= flow_1_page_size or length <= flow_2_page_size or total_product_found <= flow_3_page_size:
             no_suggestion = 1
         elif start_point_flow + flow_1_page_size >= length_product_sku or start_point_browse + flow_2_page_size >= length or start_point_search + flow_3_page_size >= total_product_found:
@@ -1155,13 +1249,23 @@ def webhook(request):
 
     mess = req.get('queryResult').get("outputContexts")
     if action != 'input.welcome':
+        if platform != None:
+            if platform == "google":
+                storage_location = "./google_storage_data/"
+            elif platform == "facebook":
+                storage_location = "./facebook_storage_data/"
+            with open(storage_location+userID+".json", 'r') as file:
+                storage = json.load(file)
         for m in mess:
             name = m.get('name')
             if name[-4:] == "back":
-                # restore the previous all responses from the parameter to use either for back functionality or to append new data
-                stored = m.get("parameters").get("parameter")
-                for k in stored:
-                    storage.append(k)
+                if platform == None:
+                    # restore the previous all responses from the parameter to use either for back functionality or to append new data
+                    stored = m.get("parameters").get("parameter")
+                    for k in stored:
+                        storage.append(k)
+                else:
+                    pass
             else:
                 # Current output context
                 context.append(m)
@@ -1225,16 +1329,24 @@ def webhook(request):
             pass
         else:
             storage.append(new_data)
+        
 
-    # "Back" output context to store the all previous responses in the parameter   
-    contexts = [['Back', 100, {'parameter': storage}]]
+    # "Back" output context to store the all previous responses in the parameter
+    if platform == None:
+        contexts = [['Back', 100, {'parameter': storage}]]
+    else:
+        contexts = [['Back', 100, {'parameter': 0}]]
 
     # "Pagination" output context to store the flow indicator and current page number, current input query, text response for the pagination
     contexts.append(["pagination", 5, {'page_start': [flow_indicator, start_point_flow, start_point_browse, start_point_search, search_product_name, text_response, last_num_of_product]}])
-    if direct == 1:
+    if redirect == 1:
         contexts.append(['Product-followup', 1, {"category_number": [parameters]}])
     if action == "search_product" and no_product_found:
         contexts.append(['SearchProduct-followup', 1, {}])
+
+    if one_product and (platform == 'None' or "google"):
+    # Set context when there is only one ietm in the list to pass the key value
+        contexts.append(["one_item_list", 1, {'key_value': key}])
 
     # Set output context
     session = req.get("session") # Get session name from fulfilment reqest
@@ -1251,9 +1363,30 @@ def webhook(request):
         text_response = "Sorry. I did not get you.\nPlease select from the given options."
         if platform == 'facebook':
             ff_messages['fulfillment_messages'][0]['text']['text'][0] = text_response
-        elif platform == "google" or platform == 'None':
+        elif platform == "google" or platform == None:
             ff_messages['fulfillment_messages'][0]['simpleResponses']['simpleResponses'][0]['displayText'] = text_response
+
     reply = ff_response.main_response(ff_text, ff_messages, ff_out_context)
+
+    # Give all user a unique User ID and store into userStorage of the assistant
+    if platform == "google":
+        if userID == None:
+            userID = uuid.uuid1()
+            reply['payload'] = {
+                'google': {
+                    'userStorage': userID
+                }
+            }
+        storage_location = "./google_storage_data/"
+    elif platform == "facebook":
+        storage_location = "./facebook_storage_data/"
+
+    # Store the responses in the file for Back functionality
+    if platform != None:
+        if os.path.isdir(storage_location) == False:
+            os.mkdir(storage_location)
+        with open(storage_location+userID+".json", 'w') as file:
+            json.dump(storage, file)
 
     # Webhook response in the json format to the dialogFlow
     return JsonResponse(reply, safe = False)

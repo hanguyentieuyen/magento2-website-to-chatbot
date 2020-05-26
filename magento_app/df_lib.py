@@ -14,6 +14,7 @@ from restinmagento.resource import Resource
 from restinmagento.oauth import OAuth
 import re
 import pickle
+import json
 
 def update_parameters(req, action):
     """ 
@@ -23,17 +24,25 @@ def update_parameters(req, action):
 
     # Get parameters from webhook request json
     requests = req.get('queryResult').get('outputContexts')
-    
+    platform = req.get('originalDetectIntentRequest').get('source')
+    if platform == 'facebook':
+        userID = req.get('originalDetectIntentRequest').get('payload').get('data').get('sender').get('id')
+    elif platform == 'google':
+        userID = req.get('originalDetectIntentRequest').get('payload').get('user').get('userStorage')
+
     # Read parameters from the output context to control the flow and pagination functionality
     for m in requests:
         name = m.get("name")
 
         if action == "Back":
             if name[-4:] == "back":
-                # with open("storage.pkl",'rb') as file:
-                #     temp = pickle.load(file)
-                # am = temp[-1][-1]
-                am = m.get('parameters').get('parameter')[-1][-1]
+                if platform == "google":
+                    storage_location = "./google_storage_data/"
+                elif platform == "facebook":
+                    storage_location = "./facebook_storage_data/"
+                with open(storage_location+userID+".json", 'r') as file:
+                    am = json.load(file)[-1][-1]
+                # am = m.get('parameters').get('parameter')[-1][-1]
                 for m in am:
                     name = m.get("name")
                     if name[-10:] == "pagination":
