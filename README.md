@@ -28,6 +28,25 @@ To import the dialogflow agent download the zip file of the agent and import thi
 ### **Make Below changes**
 
 - Copy code from the views.py file to your Django application's views.py file.
+- Copy below code in the urls.py located in your Django project folder. And replace 'magento_app' with the name of your Django app's name.
+```
+    from django.contrib import admin
+
+    from django.urls import path
+
+    from magento_app import views
+
+    urlpatterns = [
+
+        path('admin/', admin.site.urls),
+
+        path('home/', views.home, name='home'),
+
+        path('webhook/', views.webhook, name='webhook')
+
+    ]
+```
+
 
 - Open admin panel of the Magento 2 and follow system > Integrations > Add New Integration. Fill general information and user identity varification and also access all the APIs. After adding integration, copy Consumer Key, Consumer Secret, Access Token, Access Token Secret.
 
@@ -43,9 +62,11 @@ resource_owner_key = u"add resource owner key"
 
 resource_owner_secret = u"add resource owner secret"
 
-base_url_v = "Give your base URL"
+base_url = "Give your base URL"
 
 store_name = "## your store name"
+
+app_name = "## your Django app name"
 
 ```
 
